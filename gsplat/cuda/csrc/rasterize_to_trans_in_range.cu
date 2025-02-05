@@ -33,9 +33,9 @@ __global__ void rasterize_to_trans_in_range_kernel(
     const int32_t *__restrict__ chunk_starts, // [C, image_height, image_width]
     int32_t *__restrict__ chunk_cnts,         // [C, image_height, image_width]
     int64_t *__restrict__ gaussian_ids,       // [n_elems]
-    int64_t *__restrict__ pixel_ids           // [n_elems]
+    int64_t *__restrict__ pixel_ids,           // [n_elems]
     T *__restrict__ gaussian_tracker,      // [N] or [C, N]根据需求
-    int64_t *__restrict__ gaussian_counter       // [N] or [C, N]
+    int32_t *__restrict__ gaussian_counter       // [N] or [C, N]
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -154,15 +154,16 @@ __global__ void rasterize_to_trans_in_range_kernel(
                 break;
             }
 
-            int32_t g = id_batch[t];
-            int gaussian_idx = g % N;   // current gaussian id
-            atomicAdd(&gaussian_tracker[gaussian_idx], next_trans);
-            atomicAdd(&gaussian_counter[gaussian_idx], 1);
+
 
             if (first_pass) {
                 // First pass of this function we count the number of gaussians
                 // that contribute to each pixel
                 cnt += 1;
+                int32_t g = id_batch[t];
+                int gaussian_idx = g % N;   // current gaussian id
+                atomicAdd(&gaussian_tracker[gaussian_idx], trans); // collect current transmittance
+                atomicAdd(&gaussian_counter[gaussian_idx], static_cast<int32_t>(1));
             } else {
                 // Second pass we write out the gaussian ids and pixel ids
                 int32_t g_out = id_batch[t]; // flatten index in [C * N]
@@ -234,7 +235,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize
 
     // allocate memory for the tracker and counter
     torch::Tensor tracker = torch::zeros({N}, means2d.options());
-    torch::Tensor counter = torch::zeros({N}, means2d.options().dtype(torch::kInt64));
+    torch::Tensor counter = torch::zeros({N}, means2d.options().dtype(torch::kInt32));
 
     // First pass: count the number of gaussians that contribute to each pixel
     int64_t n_elems;
@@ -267,7 +268,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize
                 nullptr, //gaussian_ids
                 nullptr, //pixel_ids
                 tracker.data_ptr<float>(),
-                counter.data_ptr<int64_t>()
+                counter.data_ptr<int32_t>()
             );
 
         torch::Tensor cumsum =
@@ -307,7 +308,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize
                 gaussian_ids.data_ptr<int64_t>(),
                 pixel_ids.data_ptr<int64_t>(),
                 tracker.data_ptr<float>(),
-                counter.data_ptr<int64_t>()
+                counter.data_ptr<int32_t>()
             );
     }
     return std::make_tuple(gaussian_ids, pixel_ids, tracker, counter);

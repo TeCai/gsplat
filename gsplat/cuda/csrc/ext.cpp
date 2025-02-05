@@ -42,6 +42,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "rasterize_to_indices_in_range",
         &gsplat::rasterize_to_indices_in_range_tensor
     );
+    m.def("rasterize_to_trans_in_range", &gsplat::rasterize_to_trans_in_range_tensor);
 
     // packed version
     m.def(
