@@ -34,8 +34,8 @@ __global__ void rasterize_to_trans_in_range_kernel(
     int32_t *__restrict__ chunk_cnts,         // [C, image_height, image_width]
     int64_t *__restrict__ gaussian_ids,       // [n_elems]
     int64_t *__restrict__ pixel_ids,           // [n_elems]
-    T *__restrict__ gaussian_tracker,      // [N] or [C, N]根据需求
-    int32_t *__restrict__ gaussian_counter       // [N] or [C, N]
+    T *__restrict__ gaussian_tracker,      // [N] or [C, N] (not implemented)
+    int32_t *__restrict__ gaussian_counter       // [2, N] or [C, 2, N] (not implemented)
 ) {
     // each thread draws one pixel, but also timeshares caching gaussians in a
     // shared tile
@@ -134,6 +134,9 @@ __global__ void rasterize_to_trans_in_range_kernel(
 
         // process gaussians in the current batch for this pixel
         uint32_t batch_size = min(block_size, isect_range_end - batch_start);
+        T largest_contribution = 0.f;
+        T contribution = 0.f;
+        int largest_index = -1;
         for (uint32_t t = 0; (t < batch_size) && !done; ++t) {
             const vec3<T> conic = conic_batch[t];
             const vec3<T> xy_opac = xy_opacity_batch[t];
@@ -143,6 +146,7 @@ __global__ void rasterize_to_trans_in_range_kernel(
                                     conic.z * delta.y * delta.y) +
                             conic.y * delta.x * delta.y;
             T alpha = min(0.999f, opac * __expf(-sigma));
+            
 
             if (sigma < 0.f || alpha < 1.f / 255.f) {
                 continue;
@@ -162,8 +166,14 @@ __global__ void rasterize_to_trans_in_range_kernel(
                 cnt += 1;
                 int32_t g = id_batch[t];
                 int gaussian_idx = g % N;   // current gaussian id
+                // contribution = opacity*transmittance
+                contribution = alpha * trans;
+                if (contribution > largest_contribution) {
+                    largest_contribution = contribution;
+                    largest_index = gaussian_idx;
+                }
                 atomicAdd(&gaussian_tracker[gaussian_idx], trans); // collect current transmittance
-                atomicAdd(&gaussian_counter[gaussian_idx], static_cast<int32_t>(1));
+                atomicAdd(&gaussian_counter[0 * N + gaussian_idx], static_cast<int32_t>(1));
             } else {
                 // Second pass we write out the gaussian ids and pixel ids
                 int32_t g_out = id_batch[t]; // flatten index in [C * N]
@@ -174,6 +184,11 @@ __global__ void rasterize_to_trans_in_range_kernel(
             }
 
             trans = next_trans;
+        }
+
+        // collect largest index
+        if (first_pass && largest_index >= 0) {
+            atomicAdd(&gaussian_counter[1*N + largest_index], static_cast<int32_t>(1));
         }
     }
 
@@ -235,7 +250,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> rasterize
 
     // allocate memory for the tracker and counter
     torch::Tensor tracker = torch::zeros({N}, means2d.options());
-    torch::Tensor counter = torch::zeros({N}, means2d.options().dtype(torch::kInt32));
+    // the first row is for the tracker, the second row is to collect the most contributed Gaussians
+    torch::Tensor counter = torch::zeros({2, N}, means2d.options().dtype(torch::kInt32));
 
     // First pass: count the number of gaussians that contribute to each pixel
     int64_t n_elems;
